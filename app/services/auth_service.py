@@ -197,65 +197,47 @@ async def register_user(db: AsyncSession, data: UserRegisterRequest) -> dict:
             select(User.id).where(User.phone_number == canonical_phone)
         )
         if dup_query.scalar_one_or_none():
-            raise HTTPException(
+            raise EasyPayException(
                 status_code=409,
-                detail={"success": False, "message": "Phone number already exists."}
+                code="PHONE_NUMBER_ALREADY_REGISTERED",
+                message="This phone number is already registered.",
             )
-    except HTTPException:
+    except EasyPayException:
         raise
     except Exception as db_exc:
         logger.exception("register_user: DB duplicate check failed — %s", db_exc)
-        raise HTTPException(
+        raise EasyPayException(
             status_code=503,
-            detail={"success": False, "message": f"DATABASE_CHECK_FAILED: {type(db_exc).__name__}: {db_exc}"}
+            code="DATABASE_UNAVAILABLE",
+            message="Service temporarily unavailable. Please try again.",
         )
 
     # ── Encrypt CNIC (Rule 7) ────────────────────────────────────────────────
-    try:
-        from app.core.encryption import encrypt_sensitive
-        cnic_encrypted = encrypt_sensitive(data.cnic)
-    except Exception as enc_exc:
-        logger.exception("register_user: CNIC encryption failed — %s", enc_exc)
-        raise HTTPException(
-            status_code=500,
-            detail={"success": False, "message": f"CNIC_ENCRYPT_FAILED: {type(enc_exc).__name__}: {enc_exc}"}
-        )
+    from app.core.encryption import encrypt_sensitive
+    cnic_encrypted = encrypt_sensitive(data.cnic)
 
     # ── Stage in Memory ──────────────────────────────────────────────────────
-    try:
-        plain_otp = security.generate_totp(canonical_phone)
-    except Exception as otp_exc:
-        logger.exception("register_user: OTP generation failed — %s", otp_exc)
-        raise HTTPException(
-            status_code=500,
-            detail={"success": False, "message": f"OTP_GEN_FAILED: {type(otp_exc).__name__}: {otp_exc}"}
-        )
+    plain_otp = security.generate_totp(canonical_phone)
 
     # Dev mode: store plain OTP so /dev/otp endpoint can return it
     if settings.ENVIRONMENT == "development":
         DEV_OTP_STORE[canonical_phone] = plain_otp
 
-    try:
-        import time
-        PENDING_REGISTRATIONS_CACHE[canonical_phone] = {
-            "email": str(data.email),
-            "full_name": data.full_name,
-            "password_hash": security.hash_password(data.password),
-            "cnic_encrypted": cnic_encrypted,
-            "otp_hash": security.hash_password(plain_otp),
-            "expires_at": time.time() + 300  # 5 minutes
-        }
-    except Exception as hash_exc:
-        logger.exception("register_user: password/OTP hashing failed — %s", hash_exc)
-        raise HTTPException(
-            status_code=500,
-            detail={"success": False, "message": f"HASH_FAILED: {type(hash_exc).__name__}: {hash_exc}"}
-        )
+    import time
+    PENDING_REGISTRATIONS_CACHE[canonical_phone] = {
+        "email": str(data.email),
+        "full_name": data.full_name,
+        "password_hash": security.hash_password(data.password),
+        "cnic_encrypted": cnic_encrypted,
+        "otp_hash": security.hash_password(plain_otp),
+        "expires_at": time.time() + 300  # 5 minutes
+    }
 
     # ── Send OTP ──
     await send_otp_email(str(data.email), plain_otp)
 
     return {"message": "Verification code sent. No account created yet."}
+
 
 
 # ═════════════════════════════════════════════════════════════════════════════
