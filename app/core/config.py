@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""          # Gmail App Password (16 chars, no spaces)
     SMTP_FROM_NAME: str = "EasyPay"
 
+    # ── Resend (HTTPS-based email — preferred on Railway, replaces SMTP) ──────
+    # Get free API key at https://resend.com → 3,000 emails/month free
+    RESEND_API_KEY: str = ""
+    RESEND_FROM_EMAIL: str = "onboarding@resend.dev"   # replace with your domain once verified
+
     # ── Cloudinary ────────────────────────────────────────────────────────────
     CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""

@@ -117,56 +117,94 @@ async def _save_otp(
 
 async def send_otp_email(email: str, otp: str) -> None:
     """
-    Send an OTP via email (Gmail SMTP).
+    Send an OTP via email.
 
-    If SMTP_USER is not configured or SMTP fails, the OTP is printed to the
-    console.  In development mode the OTP is also stored in DEV_OTP_STORE
-    (keyed by email) so the /auth/dev/otp endpoint can return it.
+    Priority:
+      1. Resend API (HTTPS — works on Railway, no port restrictions)
+      2. Gmail SMTP fallback (only if RESEND_API_KEY is not set)
+      3. Console print (last resort / dev mode)
+
+    In development mode the OTP is also stored in DEV_OTP_STORE so the
+    /auth/dev/otp endpoint can return it without needing a real email.
     """
-    # Always store in dev store so the endpoint works regardless of SMTP
+    # Always persist for dev-mode /auth/dev/otp endpoint
     if settings.ENVIRONMENT == "development":
         DEV_OTP_STORE[email] = otp
 
-    if not settings.SMTP_USER:
-        print(f"🌟 DEMO BYPASS (no SMTP configured): OTP for {email} is {otp} 🌟")
-        return
+    _html_body = (
+        "<div style='font-family:sans-serif;max-width:520px;margin:auto;"
+        "background:#f9f9f9;border-radius:12px;padding:32px'>"
+        "<h2 style='color:#1565C0;margin:0 0 8px'>EasyPay Verification</h2>"
+        "<p style='color:#555'>Use the code below to complete your registration.</p>"
+        f"<div style='font-size:40px;font-weight:700;letter-spacing:10px;"
+        f"color:#1a1a1a;background:#fff;border-radius:8px;padding:20px;"
+        f"text-align:center;margin:24px 0'>{otp}</div>"
+        "<p style='color:#888;font-size:13px'>"
+        "This code expires in <strong>5 minutes</strong>. "
+        "Never share it with anyone — EasyPay will never ask for it.</p>"
+        "</div>"
+    )
 
-    import asyncio
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
+    # ── 1. Try Resend (HTTPS API — Railway-compatible) ───────────────────────
+    if settings.RESEND_API_KEY:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    "https://api.resend.com/emails",
+                    headers={
+                        "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "from": f"EasyPay <{settings.RESEND_FROM_EMAIL}>",
+                        "to": [email],
+                        "subject": f"EasyPay — Your verification code is {otp}",
+                        "html": _html_body,
+                    },
+                )
+            if response.status_code in (200, 201):
+                logger.info("OTP email sent via Resend to %s", email)
+                return
+            else:
+                logger.warning(
+                    "Resend returned %s for %s — %s",
+                    response.status_code, email, response.text,
+                )
+        except Exception as resend_exc:  # noqa: BLE001
+            logger.warning("Resend failed for %s — %s", email, resend_exc)
+        # Fall through to SMTP if Resend fails
 
-    def _send() -> None:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"EasyPay — Your verification code is {otp}"
-        msg["From"] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_USER}>"
-        msg["To"] = email
+    # ── 2. Try SMTP fallback ─────────────────────────────────────────────────
+    if settings.SMTP_USER:
+        import asyncio
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
 
-        html = (
-            f"<div style='font-family:sans-serif;max-width:480px;margin:auto'>"
-            f"<h2 style='color:#1565C0'>EasyPay Verification</h2>"
-            f"<p>Your one-time code is:</p>"
-            f"<h1 style='letter-spacing:6px;color:#333'>{otp}</h1>"
-            f"<p>This code expires in 5 minutes. Never share it with anyone.</p>"
-            f"</div>"
-        )
-        msg.attach(MIMEText(html, "html"))
+        def _smtp_send() -> None:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"EasyPay — Your verification code is {otp}"
+            msg["From"] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_USER}>"
+            msg["To"] = email
+            msg.attach(MIMEText(_html_body, "html"))
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
+                server.starttls()
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.sendmail(settings.SMTP_USER, email, msg.as_string())
 
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
-            server.starttls()
-            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            server.sendmail(settings.SMTP_USER, email, msg.as_string())
+        try:
+            await asyncio.to_thread(_smtp_send)
+            logger.info("OTP email sent via SMTP to %s", email)
+            return
+        except Exception as smtp_exc:  # noqa: BLE001
+            logger.warning("SMTP failed for %s — %s", email, smtp_exc)
 
-    try:
-        await asyncio.to_thread(_send)
-        logger.info("OTP email sent successfully to %s", email)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Email send failed to %s — OTP delivery skipped. Error: %s",
-            email,
-            exc,
-        )
-        print(f"⚠️  Email failed — OTP for {email}: {otp}")
+    # ── 3. Last resort — console log (visible in Railway logs) ───────────────
+    logger.warning("⚠️  No email provider delivered OTP for %s — code: %s", email, otp)
+    print(f"🔑 OTP [{email}]: {otp}")
+
+
 
 
 # ═════════════════════════════════════════════════════════════════════════════
