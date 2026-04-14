@@ -274,7 +274,13 @@ async def register_user(db: AsyncSession, data: UserRegisterRequest) -> dict:
     # ── Send OTP ──
     await send_otp_email(str(data.email), plain_otp)
 
-    return {"message": "Verification code sent. No account created yet."}
+    # ── TESTING PHASE: include OTP in response so app can show popup ─────────
+    # TODO: remove `debug_otp` once email delivery is confirmed working in prod
+    return {
+        "message": "Verification code sent. No account created yet.",
+        "debug_otp": plain_otp,        # ← shows in app popup during testing
+        "phone": canonical_phone,       # ← confirms the normalised phone
+    }
 
 
 
